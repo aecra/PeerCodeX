@@ -180,12 +180,29 @@ func makeFileListContent() fyne.CanvasObject {
 			return makeFileListItem(fileListWidget)
 		},
 		func(id widget.ListItemID, item fyne.CanvasObject) {
-			if dc.FileList[id].IsDownloaded {
-				item.(*fyne.Container).Objects[1].(*fyne.Container).Objects[2].(*widget.Label).Show()
-			} else {
-				item.(*fyne.Container).Objects[1].(*fyne.Container).Objects[2].(*widget.Label).Hide()
+			downloaded := true
+			f := dc.FileList[id]
+			for _, d := range f.IsDownloaded {
+				if d == false {
+					downloaded = false
+					break
+				}
 			}
-			item.(*fyne.Container).Objects[1].(*fyne.Container).Objects[1].(*widget.Label).SetText(dc.FileList[id].Path)
+			progressBar := item.(*fyne.Container).Objects[0].(*fyne.Container).Objects[0].(*widget.ProgressBar)
+			downloadedTextLabel := item.(*fyne.Container).Objects[1].(*fyne.Container).Objects[2].(*widget.Label)
+			if downloaded {
+				progressBar.SetValue(1)
+				downloadedTextLabel.Show()
+			} else {
+				// sum ProcessRate
+				var sumRate float64
+				for _, v := range f.ProcessRate {
+					sumRate += v
+				}
+				progressBar.SetValue(sumRate / float64(len(f.ProcessRate)))
+				downloadedTextLabel.Hide()
+			}
+			item.(*fyne.Container).Objects[1].(*fyne.Container).Objects[1].(*widget.Label).SetText(f.Path)
 		},
 	)
 

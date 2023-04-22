@@ -1,12 +1,17 @@
 package dc
 
 import (
+	"encoding/hex"
 	"errors"
+	"io"
 	"log"
 	"math"
+	"math/rand"
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
+	"time"
 
 	"github.com/aecra/PeerCodeX/coder"
 	"github.com/aecra/PeerCodeX/coder/decoder"
@@ -19,23 +24,23 @@ import (
 type FileItem struct {
 	NcFile            *seed.NcFile
 	Path              string
-	IsDownloaded      bool
-	IsDownloading     bool
-	ProcessRate       float64
-	HideRefresh       func()
 	Nodes             []*NodeItem
-	Conns             []net.Conn
-	Encoder           encoder.Encoder
-	Decoder           decoder.Decoder
-	Recoder           recoder.Recoder
-	AddCodedPieceChan chan *coder.CodedPiece
-	isReceiveStarted  bool
+	IsDownloaded      map[string]bool
+	IsDownloading     map[string]bool
+	ProcessRate       map[string]float64
+	Conns             map[string][]net.Conn
+	ConnsMutex        map[string]*sync.Mutex
+	Encoder           map[string]encoder.Encoder
+	Decoder           map[string]decoder.Decoder
+	Recoder           map[string]recoder.Recoder
+	AddCodedPieceChan map[string]chan *coder.CodedPiece
+	isReceiveStarted  map[string]bool
 }
 
 type NodeItem struct {
 	Addr       string
 	IsOn       bool
-	HaveClient bool
+	HaveClient map[string]bool
 }
 
 var (
@@ -43,6 +48,11 @@ var (
 	host     = "0.0.0.0"
 	port     = "8080"
 )
+
+func init() {
+	// TODO: 检测编码器的活跃时间，如果超过一定时间没有活跃，则删除
+	// 相应地修改服务器端的代码
+}
 
 func GetFileItemByPath(path string) *FileItem {
 	for _, item := range FileList {
@@ -66,53 +76,110 @@ func AddFileItem(path string) error {
 		return err
 	}
 
+	_Conns := make(map[string][]net.Conn)
+	_AddCodedPieceChan := make(map[string]chan *coder.CodedPiece)
+	_isReceiveStarted := make(map[string]bool)
+	for _, hash := range ncfile.Info.Hash {
+		_Conns[string(hash)] = make([]net.Conn, 0)
+		_AddCodedPieceChan[string(hash)] = make(chan *coder.CodedPiece, 100)
+		_isReceiveStarted[string(hash)] = false
+	}
+
 	fileItem := &FileItem{
 		NcFile:            ncfile,
 		Path:              path,
 		Nodes:             make([]*NodeItem, 0),
-		Conns:             make([]net.Conn, 0),
-		AddCodedPieceChan: make(chan *coder.CodedPiece, 100),
-		isReceiveStarted:  false,
+		Conns:             _Conns,
+		ConnsMutex:        make(map[string]*sync.Mutex),
+		AddCodedPieceChan: _AddCodedPieceChan,
+		isReceiveStarted:  _isReceiveStarted,
 	}
 
-	isDownloaded := ncfile.IsFileDownloaded(filepath.Dir(path))
-
-	if isDownloaded {
-		fileItem.IsDownloaded = true
-		fileItem.IsDownloading = false
-		fileItem.ProcessRate = 1
-		// open file to get file data
-		f, err := os.Open(filepath.Join(filepath.Dir(path), ncfile.Info.Name))
-		if err != nil {
-			return err
-		}
-		defer f.Close()
-		data, err := os.ReadFile(f.Name())
-		if err != nil {
-			return err
-		}
-		enc, err := encoder.NewFullRLNCEncoderWithPieceSize(data, uint(fileItem.NcFile.Info.PieceLength))
-		if err != nil {
-			return err
-		}
-		fileItem.Encoder = enc
-	} else {
-		fileItem.IsDownloaded = false
-		fileItem.IsDownloading = false
-		fileItem.ProcessRate = 0
-		fileItem.Decoder = decoder.NewGaussElimRLNCDecoder(uint(math.Ceil(float64(ncfile.Info.Length) / float64(ncfile.Info.PieceLength))))
+	isDownloadedBools, err := ncfile.IsFileDownloaded(filepath.Dir(path))
+	if err != nil {
+		return err
 	}
+
+	fileItem.IsDownloaded = make(map[string]bool, len(ncfile.Info.Hash))
+	fileItem.IsDownloading = make(map[string]bool, len(ncfile.Info.Hash))
+	fileItem.ProcessRate = make(map[string]float64, len(ncfile.Info.Hash))
+	fileItem.Decoder = make(map[string]decoder.Decoder, len(ncfile.Info.Hash))
+	fileItem.Encoder = make(map[string]encoder.Encoder, len(ncfile.Info.Hash))
+	fileItem.Recoder = make(map[string]recoder.Recoder, len(ncfile.Info.Hash))
+	for i, isDownloadedBool := range isDownloadedBools {
+		hashStr := string(ncfile.Info.Hash[i])
+		fileItem.ConnsMutex[hashStr] = &sync.Mutex{}
+		if !isDownloadedBool {
+			fileItem.IsDownloaded[hashStr] = false
+			fileItem.IsDownloading[hashStr] = false
+			fileItem.ProcessRate[hashStr] = 0
+			if i < len(ncfile.Info.Hash)-1 {
+				fileItem.Decoder[hashStr] = decoder.NewGaussElimRLNCDecoder(128)
+				continue
+			}
+			pieceCount := uint(math.Ceil(float64(ncfile.Info.Length%(1<<27)) / float64(1<<20)))
+			fileItem.Decoder[hashStr] = decoder.NewGaussElimRLNCDecoder(pieceCount)
+			break
+		} else {
+			fileItem.IsDownloaded[hashStr] = true
+			fileItem.IsDownloading[hashStr] = false
+			fileItem.ProcessRate[hashStr] = 1
+			// open file to get file data
+			f, err := os.Open(filepath.Join(filepath.Dir(path), ncfile.Info.Name))
+			if err != nil {
+				return err
+			}
+			start := i * (1 << 27)
+			end := (i + 1) * (1 << 27)
+			if end > int(ncfile.Info.Length) {
+				end = int(ncfile.Info.Length)
+			}
+			data := make([]byte, end-start)
+			_, err = f.Seek(int64(start), io.SeekStart)
+			if err != nil {
+				return err
+			}
+			f.Read(data)
+			f.Close()
+			enc, err := encoder.NewSparseRLNCEncoderWithPieceSize(data, 1<<20, 0.1)
+			if err != nil {
+				return err
+			}
+			fileItem.Encoder[hashStr] = enc
+		}
+	}
+
 	// add announce and announce-list
 	announce := ncfile.Announce
 	if announce != "" {
 		// add announce
-		fileItem.Nodes = append(fileItem.Nodes, &NodeItem{Addr: announce, IsOn: true, HaveClient: false})
+		_HaveClient := make(map[string]bool)
+		for _, item := range ncfile.Info.Hash {
+			_HaveClient[string(item)] = false
+		}
+		fileItem.Nodes = append(fileItem.Nodes, &NodeItem{Addr: announce, IsOn: true, HaveClient: _HaveClient})
 	}
+
 	announceList := ncfile.AnnounceList
-	if announceList != nil {
+	if announceList != nil || len(announceList) != 0 {
 		// add announce-list
 		for _, item := range announceList {
-			fileItem.Nodes = append(fileItem.Nodes, &NodeItem{Addr: item, IsOn: true, HaveClient: false})
+			// if item is already in the list, do nothing
+			isExist := false
+			for _, node := range fileItem.Nodes {
+				if node.Addr == item {
+					isExist = true
+					break
+				}
+			}
+			if isExist {
+				continue
+			}
+			_HaveClient := make(map[string]bool)
+			for _, item := range ncfile.Info.Hash {
+				_HaveClient[string(item)] = false
+			}
+			fileItem.Nodes = append(fileItem.Nodes, &NodeItem{Addr: item, IsOn: true, HaveClient: _HaveClient})
 		}
 	}
 
@@ -128,10 +195,12 @@ func DeleteFileItemByPath(path string) {
 	}
 }
 
-func IsFileExist(hash []byte) bool {
+func IsBlockExist(hash []byte) bool {
 	for _, item := range FileList {
-		if tools.CompareHash(hash, item.NcFile.Info.Hash) {
-			return true
+		for _, h := range item.NcFile.Info.Hash {
+			if tools.CompareHash(hash, h) {
+				return true
+			}
 		}
 	}
 	return false
@@ -156,11 +225,18 @@ func SetPort(p string) {
 func GetNeighbours(hash []byte) []*NodeItem {
 	// return atmost 10 neighbours
 	for _, item := range FileList {
-		if tools.CompareHash(hash, item.NcFile.Info.Hash) {
-			if len(item.Nodes) > 10 {
-				return item.Nodes[:10]
+		for _, h := range item.NcFile.Info.Hash {
+			if tools.CompareHash(hash, h) {
+				if len(item.Nodes) > 10 {
+					// return 10 nodes randomly
+					rand.Seed(time.Now().UnixNano())
+					rand.Shuffle(len(item.Nodes), func(i, j int) {
+						item.Nodes[i], item.Nodes[j] = item.Nodes[j], item.Nodes[i]
+					})
+					return item.Nodes[:10]
+				}
+				return item.Nodes
 			}
-			return item.Nodes
 		}
 	}
 	return nil
@@ -168,101 +244,145 @@ func GetNeighbours(hash []byte) []*NodeItem {
 
 func GetCodedPiece(hash []byte) *coder.CodedPiece {
 	for _, item := range FileList {
-		if tools.CompareHash(hash, item.NcFile.Info.Hash) {
-			// if encoder is not nil, use encoder
-			// or use recoder
-			if item.Encoder != nil {
-				return item.Encoder.CodedPiece()
-			}
-			if item.Recoder != nil {
-				codedPiece, err := item.Recoder.CodedPiece()
-				if err != nil {
-					return nil
+		for _, h := range item.NcFile.Info.Hash {
+			if tools.CompareHash(hash, h) {
+				if item.Encoder[string(hash)] != nil {
+					return item.Encoder[string(hash)].CodedPiece()
 				}
-				return codedPiece
+				if item.Recoder[string(hash)] != nil {
+					codedPiece, err := item.Recoder[string(hash)].CodedPiece()
+					if err != nil {
+						return nil
+					}
+					return codedPiece
+				}
 			}
 		}
 	}
 	return nil
 }
 
-func (f *FileItem) AddCodedPiece(codedPiece *coder.CodedPiece) {
-	if f.IsDownloaded {
+func (f *FileItem) AddCodedPiece(hash []byte, codedPiece *coder.CodedPiece) {
+	hashStr := string(hash)
+	if f.IsDownloaded[hashStr] {
+		log.Println("already downloaded")
 		return
 	}
-	if f.Decoder == nil {
+	if f.Decoder[hashStr] == nil {
 		return
 	}
-	f.Decoder.AddPiece(codedPiece)
-	if f.Recoder == nil {
+	f.Decoder[hashStr].AddPiece(codedPiece)
+	if f.Recoder[hashStr] == nil {
 		ps := make([]*coder.CodedPiece, 1)
 		ps[0] = codedPiece
-		f.Recoder = recoder.NewFullRLNCRecoder(ps)
+		f.Recoder[hashStr] = recoder.NewFullRLNCRecoder(ps)
 	}
-	f.Recoder.AddCodedPiece(codedPiece)
+	f.Recoder[hashStr].AddCodedPiece(codedPiece)
 
-	log.Println(f.Path, "still need", f.Decoder.Required())
+	f.ProcessRate[hashStr] = f.Decoder[hashStr].ProcessRate()
 
-	if f.Decoder.IsDecoded() {
+	if f.Decoder[hashStr].IsDecoded() {
 		filePath := f.Path[:len(f.Path)-len(filepath.Ext(f.Path))]
-		pieces, err := f.Decoder.GetPieces()
+		pieces, err := f.Decoder[hashStr].GetPieces()
 		if err != nil {
 			return
 		}
 
-		// write pieces to file
-		file, err := os.Create(filePath)
-		if err != nil {
-			return
-		}
-		defer file.Close()
-		currentLength := 0
-		for _, piece := range pieces {
-			if len(piece)+currentLength > int(f.NcFile.Info.Length) {
-				_, err = file.Write(piece[:int(f.NcFile.Info.Length)-currentLength])
-				if err != nil {
-					return
-				}
+		index := 0
+		for _, h := range f.NcFile.Info.Hash {
+			if tools.CompareHash(h, hash) {
+				break
 			}
-			_, err = file.Write(piece)
+			index++
+		}
+		start := index * (1 << 27)
+		// if file is not exist, create it
+		if _, err := os.Stat(filePath); os.IsNotExist(err) {
+			file, err := os.Create(filePath)
 			if err != nil {
 				return
 			}
+			file.Close()
+		}
+		// if file is occupyed by other process, wait
+		for {
+			file, err := os.OpenFile(filePath, os.O_WRONLY, 0666)
+			if err != nil {
+				time.Sleep(100 * time.Millisecond)
+				continue
+			}
+			_, err = file.Seek(int64(start), 0)
+			if err != nil {
+				return
+			}
+
+			if index == len(f.NcFile.Info.Hash)-1 {
+				currentLength := 0
+				for _, piece := range pieces {
+					if len(piece)+currentLength > int(f.NcFile.Info.Length%(1<<27)) {
+						_, err = file.Write(piece[:int(f.NcFile.Info.Length%(1<<27))-currentLength])
+						if err != nil {
+							return
+						}
+						continue
+					}
+					_, err = file.Write(piece)
+					if err != nil {
+						return
+					}
+					currentLength += len(piece)
+				}
+			} else {
+				for _, piece := range pieces {
+					_, err = file.Write(piece)
+					if err != nil {
+						return
+					}
+				}
+			}
+			file.Close()
+			break
 		}
 
-		f.IsDownloaded = true
-		f.IsDownloading = false
-		f.ProcessRate = 1
+		f.IsDownloaded[hashStr] = true
+		f.IsDownloading[hashStr] = false
+		f.ProcessRate[hashStr] = 1
 	}
 }
 
 func (f *FileItem) StartReceiveCodedPiece() {
-	if f.isReceiveStarted {
+	for _, h := range f.NcFile.Info.Hash {
+		f.StartReceive(h)
+	}
+}
+func (f *FileItem) StartReceive(hash []byte) {
+	hashStr := string(hash)
+	if f.isReceiveStarted[hashStr] {
 		return
 	}
-	f.isReceiveStarted = true
+	f.isReceiveStarted[hashStr] = true
+	// TODO: 考虑多余 goroutine 和 channel 的问题
 	go func() {
 		for {
-			codedPiece := <-f.AddCodedPieceChan
-			f.AddCodedPiece(codedPiece)
-			if f.IsDownloaded {
-				log.Println(f.Path, "is downloaded")
+			codedPiece := <-f.AddCodedPieceChan[hashStr]
+			f.AddCodedPiece(hash, codedPiece)
+			if f.IsDownloaded[hashStr] {
+				log.Println("Block (hash:" + hex.EncodeToString(hash) + ") of (" + f.Path + ") is downloaded")
 				// stop all connections
-				for _, conn := range f.Conns {
+				for _, conn := range f.Conns[hashStr] {
 					if conn == nil {
 						continue
 					}
 					conn.Close()
 				}
 				// clear f.Conns
-				f.Conns = []net.Conn{}
+				f.Conns[hashStr] = []net.Conn{}
 				for _, node := range f.Nodes {
-					node.HaveClient = false
+					node.HaveClient[hashStr] = false
 				}
-				f.HideRefresh()
 
 				// remove decoder and recoder, add encoder
-				pieces, _ := f.Decoder.GetPieces()
+				pieces, _ := f.Decoder[hashStr].GetPieces()
 				data := make([]byte, 0, f.NcFile.Info.Length)
 				currentLength := 0
 				for _, piece := range pieces {
@@ -272,10 +392,10 @@ func (f *FileItem) StartReceiveCodedPiece() {
 					}
 					data = append(data, piece...)
 				}
-				enc, _ := encoder.NewFullRLNCEncoderWithPieceSize(data, uint(f.NcFile.Info.PieceLength))
-				f.Decoder = nil
-				f.Recoder = nil
-				f.Encoder = enc
+				enc, _ := encoder.NewFullRLNCEncoderWithPieceSize(data, 1<<20)
+				f.Decoder[hashStr] = nil
+				f.Recoder[hashStr] = nil
+				f.Encoder[hashStr] = enc
 				break
 			}
 		}
@@ -315,10 +435,14 @@ func AddNode(address string) {
 				return
 			}
 		}
+		_HaveClient := make(map[string]bool)
+		for _, h := range item.NcFile.Info.Hash {
+			_HaveClient[string(h)] = false
+		}
 		item.Nodes = append(item.Nodes, &NodeItem{
 			Addr:       address,
 			IsOn:       false,
-			HaveClient: false,
+			HaveClient: _HaveClient,
 		})
 	}
 }

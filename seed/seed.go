@@ -23,24 +23,15 @@ type NcFile struct {
 	CreationDate time.Time `bencode:"creation date"`
 
 	Info struct {
-		Name        string `bencode:"name"`
-		PieceLength int64  `bencode:"piece length"`
-		Hash        []byte `bencode:"hash"`
-		Length      int64  `bencode:"length"`
+		Name   string   `bencode:"name"`
+		Hash   [][]byte `bencode:"hash"`
+		Length int64    `bencode:"length"`
 	} `bencode:"info"`
 }
 
-type NcInfo struct {
-	Name        string
-	PieceLength int64
-	Hash        []byte
-	Length      int64
-}
-
-func (f *NcFile) GenarateInfo(path string, pieceLength int64) error {
+func (f *NcFile) GenarateInfo(path string) error {
 	// generate NcInfo from path
 	// if path is a file, then SingleFile is true
-	f.Info.PieceLength = (1 << 10) * pieceLength
 	info, err := os.Stat(path)
 	if err != nil {
 		return err
@@ -49,11 +40,11 @@ func (f *NcFile) GenarateInfo(path string, pieceLength int64) error {
 		return errors.New("directory is not supported yet")
 	} else {
 		f.Info.Name = info.Name()
-		hash, err := tools.GetHashofFile(path)
+		hashs, err := tools.GetHashsofFile(path)
 		if err != nil {
 			return err
 		}
-		f.Info.Hash = hash
+		f.Info.Hash = hashs
 		f.Info.Length = info.Size()
 	}
 	return nil
@@ -88,22 +79,48 @@ func (f *NcFile) Load(file *os.File) error {
 		return err
 	}
 	bencode.DecodeBytes(content, f)
+	announcelist := make([]string, 0)
+	for _, v := range f.AnnounceList {
+		if v != "" {
+			announcelist = append(announcelist, v)
+		}
+	}
+	f.AnnounceList = announcelist
 	return nil
 }
 
-func (f *NcFile) IsFileDownloaded(dir string) bool {
+func (f *NcFile) IsFileDownloaded(dir string) ([]bool, error) {
+	result := make([]bool, len(f.Info.Hash))
 	if f.Info.Length == 0 {
-		return false
-	}
-	hash, err := tools.GetHashofFile(filepath.Join(dir, f.Info.Name))
-	if err != nil {
-		return false
-	}
-	if !tools.CompareHash(f.Info.Hash, hash) {
-		return false
+		return nil, errors.New("This is a file is empty")
 	}
 
-	return true
+	fi, err := os.Stat(filepath.Join(dir, f.Info.Name))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return result, nil
+		}
+		return result, err
+	}
+	if fi.Size() != f.Info.Length {
+		return result, errors.New("the size of existing file is not equal to the size of seed file")
+	}
+
+	hashs, err := tools.GetHashsofFile(filepath.Join(dir, f.Info.Name))
+	if err != nil {
+		return result, err
+	}
+
+	if len(f.Info.Hash) != len(hashs) {
+		return nil, errors.New("the size of existing file is not equal to the size of seed file")
+	}
+	for i := 0; i < len(f.Info.Hash); i++ {
+		if tools.CompareHash(f.Info.Hash[i], hashs[i]) {
+			result[i] = true
+		}
+	}
+
+	return result, nil
 }
 
 func NewNcFileFromSeedFile(path string) (*NcFile, error) {
@@ -122,7 +139,7 @@ func NewNcFileFromSeedFile(path string) (*NcFile, error) {
 	return &ncFile, nil
 }
 
-func CreateSeedFile(path string, pieceLength int, comment string, announce string, announceList string) error {
+func CreateSeedFile(path string, comment string, announce string, announceList string) error {
 	// create seed from path
 	ncFile := NcFile{
 		Announce:     announce,
@@ -131,7 +148,7 @@ func CreateSeedFile(path string, pieceLength int, comment string, announce strin
 		CreateBy:     "PeerCodeX 0.0.1",
 		CreationDate: time.Now(),
 	}
-	err := ncFile.GenarateInfo(path, int64(pieceLength))
+	err := ncFile.GenarateInfo(path)
 	if err != nil {
 		return err
 	}

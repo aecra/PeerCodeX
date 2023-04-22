@@ -6,8 +6,9 @@ import (
 	"log"
 	"net"
 	"path/filepath"
-	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
@@ -27,10 +28,6 @@ func makeNewSeedButton() *widget.Button {
 		log.Println("Create New Seed File")
 
 		filePath := ""
-		pieceLengthWidget := widget.NewSelect(
-			[]string{"4 KB", "8 KB", "16 KB", "32 KB", "64 KB", "128 KB", "256 KB", "512 KB", "1024 KB"},
-			func(s string) {},
-		)
 		commentWidget := widget.NewEntry()
 		announceWidget := widget.NewEntry()
 		announceListWidget := widget.NewMultiLineEntry()
@@ -52,7 +49,6 @@ func makeNewSeedButton() *widget.Button {
 
 				fd.Show()
 			})),
-			widget.NewFormItem("Piece Length", pieceLengthWidget),
 			widget.NewFormItem("Comment", commentWidget),
 			widget.NewFormItem("Announce", announceWidget),
 			widget.NewFormItem("Announce List", announceListWidget),
@@ -72,8 +68,9 @@ func makeNewSeedButton() *widget.Button {
 				}
 				announceList = strings.Join(v1, ",")
 			}
-			pieceLength, _ := strconv.Atoi(strings.Split(pieceLengthWidget.Selected, " ")[0])
-			err := seed.CreateSeedFile(filePath, pieceLength, comment, announce, announceList)
+			openLoadingMask()
+			err := seed.CreateSeedFile(filePath, comment, announce, announceList)
+			closeLoadingMask()
 			if err != nil {
 				dialog.ShowError(err, topWindow)
 				return
@@ -100,25 +97,30 @@ func makeFileListToolbar(refresh func()) *widget.Toolbar {
 
 			// add file
 			log.Println(reader.URI().Path())
+			openLoadingMask()
 			err = dc.AddFileItem(reader.URI().Path())
 			if err != nil {
 				dialog.ShowError(err, topWindow)
 				return
 			}
+			closeLoadingMask()
 			refresh()
 		}, topWindow)
 		fd.SetFilter(storage.NewExtensionFileFilter([]string{".nc"}))
 		fd.Show()
 	}),
 		widget.NewToolbarSpacer(),
-		widget.NewToolbarAction(theme.ViewRefreshIcon(), func() { fmt.Println("Refresh") }),
+		widget.NewToolbarAction(theme.ViewRefreshIcon(), func() { log.Println("Refresh") }),
 	)
 }
 
+var refreshGoroutine = make(map[string]struct{})
+var downloadActive = sync.Mutex{}
+
 func makeFileListItem(parent *widget.List) *fyne.Container {
 	pathLabel := widget.NewLabel("File Name")
-	processBar := container.NewVBox(widget.NewProgressBarInfinite())
-	processBar.Hide()
+	progressBar := widget.NewProgressBar()
+	progressBar.SetValue(0)
 	var InfoAction, DownloadAction, DeleteAction *widget.ToolbarAction
 	InfoAction = widget.NewToolbarAction(theme.InfoIcon(), func() {
 		log.Println("Info of ", pathLabel.Text)
@@ -126,15 +128,18 @@ func makeFileListItem(parent *widget.List) *fyne.Container {
 		if f == nil {
 			dialog.ShowError(errors.New("file not found"), topWindow)
 		}
+		hashs := ""
+		for _, v := range f.NcFile.Info.Hash {
+			hashs += fmt.Sprintf("%x\n", v)
+		}
 		items := []*widget.FormItem{
 			widget.NewFormItem("Name", widget.NewLabel(filepath.Base(f.Path))),
 			widget.NewFormItem("Path", widget.NewLabel(f.Path)),
-			widget.NewFormItem("SHA1 Hash", widget.NewLabel(fmt.Sprintf("%x", f.NcFile.Info.Hash))),
+			widget.NewFormItem("SHA1 Hash", widget.NewLabel(hashs)),
 			widget.NewFormItem("Comment", widget.NewLabel(f.NcFile.Comment)),
 			widget.NewFormItem("Creation Date", widget.NewLabel(f.NcFile.CreationDate.String())),
 			widget.NewFormItem("Announce", widget.NewLabel(f.NcFile.Announce)),
 			widget.NewFormItem("Announce List", widget.NewLabel(strings.Join(f.NcFile.AnnounceList, "\n"))),
-			widget.NewFormItem("Piece Length", widget.NewLabel(tools.FormatByteSize(f.NcFile.Info.PieceLength))),
 			widget.NewFormItem("Length", widget.NewLabel(tools.FormatByteSize(f.NcFile.Info.Length))),
 		}
 		form := &widget.Form{Items: items}
@@ -142,56 +147,112 @@ func makeFileListItem(parent *widget.List) *fyne.Container {
 		formDialog.Show()
 	})
 	DownloadAction = widget.NewToolbarAction(data.DownloadOff, func() {
-		log.Println("download")
+		downloadActive.Lock()
+		defer downloadActive.Unlock()
+
 		f := dc.GetFileItemByPath(pathLabel.Text)
 		if f == nil {
 			dialog.ShowError(errors.New("file not found"), topWindow)
 		}
 
-		if f.IsDownloaded {
-			processBar.Hide()
+		idDownloaded := true
+		for _, v := range f.IsDownloaded {
+			if v == false {
+				idDownloaded = false
+				break
+			}
+		}
+		if idDownloaded {
+			progressBar.SetValue(1)
 			return
 		}
 
-		if f.IsDownloading {
-			f.IsDownloading = false
-			// close all connections
-			for _, c := range f.Conns {
-				c.Close()
-			}
-			// clear f.Conns
-			f.Conns = []net.Conn{}
-			for _, node := range f.Nodes {
-				node.HaveClient = false
-			}
-			processBar.Hide()
-			parent.Refresh()
-			return
-		}
+		// use a goroutine to watch the download status
+		_, ok := refreshGoroutine[pathLabel.Text]
+		if !ok {
+			refreshGoroutine[pathLabel.Text] = struct{}{}
+			go func() {
+				for {
+					_, ok := refreshGoroutine[pathLabel.Text]
+					if !ok {
+						break
+					}
 
-		f.IsDownloading = true
-		f.StartReceiveCodedPiece()
-		for _, node := range f.Nodes {
-			if node.IsOn == true && node.HaveClient == false {
-				// start a new client
-				c := client.NewClient(node.Addr, f.NcFile.Info.Hash, dc.GetPort(), f.AddCodedPieceChan)
-				connChan := make(chan net.Conn)
-				go c.Start(connChan)
-				if f.Conns == nil {
-					f.Conns = make([]net.Conn, 0)
+					idDownloaded := true
+					for _, v := range f.IsDownloaded {
+						if v == false {
+							idDownloaded = false
+							break
+						}
+					}
+					// if downloaded, stop watching
+					if idDownloaded {
+						progressBar.SetValue(1)
+						break
+					}
+
+					// sum ProcessRate
+					var sumRate float64
+					for _, v := range f.ProcessRate {
+						sumRate += v
+					}
+					progressBar.SetValue(sumRate / float64(len(f.ProcessRate)))
+
+					time.Sleep(time.Second)
 				}
-				c.Conn = <-connChan
-				f.Conns = append(f.Conns, c.Conn)
-				node.HaveClient = true
+			}()
+		}
+
+		// if any block is downloading, stop it
+		anyDownloading := false
+		for hashStr, v := range f.IsDownloading {
+			if v {
+				anyDownloading = true
+				f.IsDownloading[hashStr] = false
+				// close all connections
+				for _, c := range f.Conns[hashStr] {
+					c.Close()
+				}
+				// clear f.Conns
+				f.Conns[hashStr] = []net.Conn{}
+				for _, node := range f.Nodes {
+					node.HaveClient[hashStr] = false
+				}
 			}
 		}
-		var refresh = func() {
-			processBar.Hide()
+		if anyDownloading {
 			parent.Refresh()
+			return
 		}
-		f.HideRefresh = refresh
 
-		processBar.Show()
+		f.StartReceiveCodedPiece()
+		for hashStr := range f.IsDownloading {
+			f.IsDownloading[hashStr] = true
+			for _, node := range f.Nodes {
+				if node.IsOn == true && node.HaveClient[hashStr] == false {
+					// start a new client
+					c := client.NewClient(node.Addr, []byte(hashStr), dc.GetPort(), f.AddCodedPieceChan[hashStr])
+					connChan := make(chan net.Conn)
+					go c.Start(connChan)
+					if f.Conns[hashStr] == nil {
+						f.Conns[hashStr] = make([]net.Conn, 0)
+					}
+					// timeout
+					go func(hashStr string, node *dc.NodeItem) {
+						select {
+						case c.Conn = <-connChan:
+							f.ConnsMutex[hashStr].Lock()
+							f.Conns[hashStr] = append(f.Conns[hashStr], c.Conn)
+							f.ConnsMutex[hashStr].Unlock()
+							node.HaveClient[hashStr] = true
+						case <-time.After(time.Second * 5):
+						}
+					}(hashStr, node)
+
+				}
+			}
+		}
+
 		parent.Refresh()
 	})
 	DeleteAction = widget.NewToolbarAction(theme.DeleteIcon(), func() {
@@ -200,15 +261,17 @@ func makeFileListItem(parent *widget.List) *fyne.Container {
 		if f == nil {
 			dialog.ShowError(errors.New("file not found"), topWindow)
 		}
-		if f.IsDownloading {
-			// close all connections
-			for _, c := range f.Conns {
-				c.Close()
-			}
-			// clear f.Conns
-			f.Conns = []net.Conn{}
-			for _, node := range f.Nodes {
-				node.HaveClient = false
+		for hashStr, conns := range f.Conns {
+			if f.IsDownloading[hashStr] {
+				// close all connections
+				for _, c := range conns {
+					c.Close()
+				}
+				// clear f.Conns
+				f.Conns[hashStr] = []net.Conn{}
+				for _, node := range f.Nodes {
+					node.HaveClient[hashStr] = false
+				}
 			}
 		}
 
@@ -218,7 +281,7 @@ func makeFileListItem(parent *widget.List) *fyne.Container {
 
 	return container.NewBorder(
 		nil,
-		processBar,
+		container.NewVBox(progressBar),
 		container.NewHBox(widget.NewIcon(theme.DocumentIcon()), pathLabel, widget.NewLabel("(Downloaded)")),
 		container.NewHBox(widget.NewToolbar(
 			widget.NewToolbarSpacer(),

@@ -38,6 +38,12 @@ func (d *GaussElimRLNCDecoder) Required() uint {
 	return d.expected - d.useful
 }
 
+// ProcessRate - How many pieces are received so far ?
+// Returns a value in range [0..1]
+func (d *GaussElimRLNCDecoder) ProcessRate() float64 {
+	return float64(d.useful) / float64(d.expected)
+}
+
 // AddPiece - Adds a new received coded piece along with
 // coding vector. After every new coded piece reception
 // augmented matrix ( coding vector + coded piece )

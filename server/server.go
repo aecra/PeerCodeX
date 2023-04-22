@@ -141,7 +141,7 @@ func handShake(conn net.Conn, server *Server) (reserved []byte, hash []byte, err
 	serverPort := binary.BigEndian.Uint16(rbuf[43:45])
 	addr := clientIP + ":" + strconv.Itoa(int(serverPort))
 	dc.AddNode(addr)
-	exist := dc.IsFileExist(rbuf[23:43])
+	exist := dc.IsBlockExist(rbuf[23:43])
 
 	// response
 	sbuf := make([]byte, 45)

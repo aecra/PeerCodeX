@@ -1,8 +1,6 @@
 package main
 
 import (
-	"log"
-
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/container"
@@ -12,6 +10,7 @@ import (
 )
 
 var topWindow fyne.Window
+var mainContent *container.Split
 
 func main() {
 	a := app.NewWithID("cn.aecra.PeerCodeX")
@@ -61,12 +60,31 @@ func main() {
 
 	split := container.NewHSplit(leftNav, content)
 	split.Offset = 0.2
+	mainContent = split
 	w.SetContent(split)
 
 	// 设置最小窗口大小
 	w.Resize(fyne.NewSize(800, 600))
 
-	buf := []byte{0x01, 0x10}
-	log.Println(uint16(buf[0])<<8 | uint16(buf[1]))
 	w.ShowAndRun()
+}
+
+// Open the masklayer
+func openLoadingMask() {
+	topWindow.SetContent(makeLoadingMask())
+}
+
+func closeLoadingMask() {
+	topWindow.SetContent(mainContent)
+	mainContent.Refresh()
+}
+
+// Create a mask layer showing the loading animation
+func makeLoadingMask() *fyne.Container {
+	loading := widget.NewProgressBarInfinite()
+	loading.Show()
+	loading.Start()
+
+	loadingBox := container.NewCenter(loading)
+	return loadingBox
 }

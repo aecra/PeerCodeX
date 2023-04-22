@@ -2,6 +2,7 @@ package client
 
 import (
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"io"
 	"log"
@@ -44,28 +45,35 @@ func init() {
 	go func() {
 		time.Sleep(60 * time.Second)
 		for _, file := range dc.FileList {
-			if file.IsDownloaded {
-				continue
-			}
-			if file.AddCodedPieceChan == nil {
-				file.AddCodedPieceChan = make(chan *coder.CodedPiece, 100)
-			}
-			for _, node := range file.Nodes {
-				if node.IsOn == true && node.HaveClient == false {
-					// start a new client
-					c := NewClient(node.Addr, file.NcFile.Info.Hash, dc.GetPort(), file.AddCodedPieceChan)
-					connChan := make(chan net.Conn)
-					go c.Start(connChan)
-					if file.Conns == nil {
-						file.Conns = make([]net.Conn, 0)
+			for _, hash := range file.NcFile.Info.Hash {
+				hashStr := string(hash)
+				if file.IsDownloaded[hashStr] {
+					continue
+				}
+				if file.AddCodedPieceChan[hashStr] == nil {
+					file.AddCodedPieceChan[hashStr] = make(chan *coder.CodedPiece, 100)
+				}
+				for _, node := range file.Nodes {
+					if node.IsOn == true && node.HaveClient[hashStr] == false {
+						// start a new client
+						c := NewClient(node.Addr, hash, dc.GetPort(), file.AddCodedPieceChan[hashStr])
+						connChan := make(chan net.Conn)
+						go c.Start(connChan)
+						if file.Conns[hashStr] == nil {
+							file.Conns[hashStr] = make([]net.Conn, 0)
+						}
+						c.Conn = <-connChan
+						file.ConnsMutex[hashStr].Lock()
+						file.Conns[hashStr] = append(file.Conns[hashStr], c.Conn)
+						file.ConnsMutex[hashStr].Unlock()
+						node.HaveClient[hashStr] = true
 					}
-					c.Conn = <-connChan
-					file.Conns = append(file.Conns, c.Conn)
-					node.HaveClient = true
 				}
 			}
 		}
 	}()
+
+	// TODO：检测是否有足够的邻居节点，如果没有则请求
 }
 
 func CkeckAllServerStatus() {
@@ -177,6 +185,7 @@ func (c *Client) GetNeighbours() []string {
 
 func (c *Client) Start(connChan chan net.Conn) {
 	// create a TCP connection
+	log.Println("Dialed to ", c.Addr, "for ", hex.EncodeToString(c.Hash))
 	conn, err := net.Dial("tcp", c.Addr)
 	if err != nil {
 		return
@@ -232,6 +241,5 @@ func (c *Client) Start(connChan chan net.Conn) {
 		}
 		codedPiece.Piece = pieceBuf
 		c.AddCodedPieceChan <- &codedPiece
-		// log.Println("receive codedPiece from server for hash:", hex.EncodeToString(c.Hash))
 	}
 }

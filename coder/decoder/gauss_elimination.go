@@ -58,6 +58,9 @@ func (d *GaussElimRLNCDecoder) AddPiece(piece *coder.CodedPiece) error {
 		return coder.ErrAllUsefulPiecesReceived
 	}
 
+	if !d.state.IsLinearIndependent(piece.Vector) {
+		return nil
+	}
 	d.state.AddPiece(piece)
 	d.received++
 	if !(d.received > 1) {

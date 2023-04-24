@@ -11,6 +11,8 @@ type GaussElimDecoderState struct {
 	pieceCount uint
 	coeffs     matrix.Matrix
 	coded      matrix.Matrix
+
+	coeffsLI matrix.Matrix
 }
 
 func min(a, b int) int {
@@ -73,6 +75,49 @@ func (d *GaussElimDecoderState) clean_forward() {
 	}
 }
 
+func (d *GaussElimDecoderState) clean_forward_li() {
+	var (
+		rows     int = int(d.coeffsLI.Rows())
+		cols     int = int(d.coeffsLI.Cols())
+		boundary int = min(rows, cols)
+	)
+
+	for i := 0; i < boundary; i++ {
+		if d.coeffsLI[i][i] == 0 {
+			non_zero_col := false
+			pivot := i + 1
+			for ; pivot < rows; pivot++ {
+				if d.coeffsLI[pivot][i] != 0 {
+					non_zero_col = true
+					break
+				}
+			}
+
+			if !non_zero_col {
+				continue
+			}
+
+			// row switching in coefficient matrix
+			{
+				tmp := d.coeffsLI[i]
+				d.coeffsLI[i] = d.coeffsLI[pivot]
+				d.coeffsLI[pivot] = tmp
+			}
+		}
+
+		for j := i + 1; j < rows; j++ {
+			if d.coeffsLI[j][i] == 0 {
+				continue
+			}
+
+			quotient := d.field.Div(d.coeffsLI[j][i], d.coeffsLI[i][i])
+			for k := i; k < cols; k++ {
+				d.coeffsLI[j][k] = d.field.Add(d.coeffsLI[j][k], d.field.Mul(d.coeffsLI[i][k], quotient))
+			}
+		}
+	}
+}
+
 func (d *GaussElimDecoderState) clean_backward() {
 	var (
 		rows     int = int(d.coeffs.Rows())
@@ -121,6 +166,45 @@ func (d *GaussElimDecoderState) clean_backward() {
 	}
 }
 
+func (d *GaussElimDecoderState) clean_backward_li() {
+	var (
+		rows     int = int(d.coeffsLI.Rows())
+		cols     int = int(d.coeffsLI.Cols())
+		boundary int = min(rows, cols)
+	)
+
+	for i := boundary - 1; i >= 0; i-- {
+		if d.coeffsLI[i][i] == 0 {
+			continue
+		}
+
+		for j := 0; j < i; j++ {
+			if d.coeffsLI[j][i] == 0 {
+				continue
+			}
+
+			quotient := d.field.Div(d.coeffsLI[j][i], d.coeffsLI[i][i])
+			for k := i; k < cols; k++ {
+				d.coeffsLI[j][k] = d.field.Add(d.coeffsLI[j][k], d.field.Mul(d.coeffsLI[i][k], quotient))
+			}
+		}
+
+		if d.coeffsLI[i][i] == 1 {
+			continue
+		}
+
+		inv := d.field.Div(1, d.coeffsLI[i][i])
+		d.coeffsLI[i][i] = 1
+		for j := i + 1; j < cols; j++ {
+			if d.coeffsLI[i][j] == 0 {
+				continue
+			}
+
+			d.coeffsLI[i][j] = d.field.Mul(d.coeffsLI[i][j], inv)
+		}
+	}
+}
+
 func (d *GaussElimDecoderState) remove_zero_rows() {
 	var (
 		cols = len(d.coeffs[0])
@@ -152,6 +236,32 @@ func (d *GaussElimDecoderState) remove_zero_rows() {
 	}
 }
 
+func (d *GaussElimDecoderState) remove_zero_rows_li() {
+	var (
+		cols = len(d.coeffsLI[0])
+	)
+
+	for i := 0; i < len(d.coeffsLI); i++ {
+		yes := true
+		for j := 0; j < cols; j++ {
+			if d.coeffsLI[i][j] != 0 {
+				yes = false
+				break
+			}
+		}
+		if !yes {
+			continue
+		}
+
+		// resize `coeffsLI` matrix
+		d.coeffsLI[i] = nil
+		copy((d.coeffsLI)[i:], (d.coeffsLI)[i+1:])
+		d.coeffsLI = (d.coeffsLI)[:len(d.coeffsLI)-1]
+
+		i = i - 1
+	}
+}
+
 // Calculates Reduced Row Echelon Form of coefficient
 // matrix, while also modifying coded piece matrix
 // First it forward, backward cleans up matrix
@@ -169,11 +279,58 @@ func (d *GaussElimDecoderState) Rref() {
 	d.remove_zero_rows()
 }
 
+func (d *GaussElimDecoderState) rref_li() {
+	d.clean_forward_li()
+	d.clean_backward_li()
+	d.remove_zero_rows_li()
+}
+
+func (d *GaussElimDecoderState) IsLinearIndependent(vector coder.CodingVector) bool {
+	if d.coeffs.Rows() == 0 {
+		return true
+	}
+
+	if d.coeffsLI == nil {
+		d.coeffsLI = make([][]byte, d.coeffs.Rows(), d.pieceCount)
+		for i := 0; i < len(d.coeffsLI); i++ {
+			d.coeffsLI[i] = make([]byte, d.coeffs.Cols())
+		}
+	}
+
+	// adjust size of `coeffsLI` matrix to len(d.coeffs) + 1
+	if len(d.coeffsLI) < int(d.coeffs.Rows())+1 {
+		k := len(d.coeffsLI)
+		d.coeffsLI = append(d.coeffsLI, make([][]byte, int(d.coeffs.Rows())+1-len(d.coeffsLI))...)
+		for i := len(d.coeffsLI) - 1; i >= k; i-- {
+			d.coeffsLI[i] = make([]byte, d.coeffs.Cols())
+		}
+	}
+
+	// copy `d.coeffs` to `d.coeffsLI`
+	for i := 0; i < len(d.coeffs); i++ {
+		copy(d.coeffsLI[i], d.coeffs[i])
+	}
+
+	// copy `vector` to `d.coeffsLI`
+	copy(d.coeffsLI[len(d.coeffs)], vector)
+
+	// calculate rref of `d.coeffsLI`
+	d.rref_li()
+	if d.rank_li() == d.Rank() {
+		return false
+	}
+	return true
+}
+
 // Expected to be invoked after RREF-ed, in other words
 // it won't rref matrix first to calculate rank,
 // rather that needs to first invoked
 func (d *GaussElimDecoderState) Rank() uint {
 	return d.coeffs.Rows()
+}
+
+func (d *GaussElimDecoderState) rank_li() uint {
+	return d.coeffsLI.Rows()
 }
 
 // Current state of coding coefficient matrix

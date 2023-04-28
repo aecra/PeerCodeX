@@ -3,8 +3,8 @@ package encoder
 import (
 	"math/rand"
 
-	galoisfield "github.com/aecra/PeerCodeX/coder/galoisfield/table"
 	"github.com/aecra/PeerCodeX/coder"
+	galoisfield "github.com/aecra/PeerCodeX/coder/galoisfield/table"
 )
 
 type SparseRLNCEncoder struct {
@@ -67,7 +67,7 @@ func (s *SparseRLNCEncoder) CodedPiece() *coder.CodedPiece {
 	vector := coder.GenerateCodingVector(s.PieceCount())
 	// set some elements to zero
 	for i := range vector {
-		if rand.Float64() > s.probability {
+		if rand.Float64() <= s.probability {
 			vector[i] = 0
 		}
 	}
@@ -100,6 +100,11 @@ func NewSparseRLNCEncoderWithPieceCount(data []byte, pieceCount uint, probabilit
 	pieces, padding, err := coder.OriginalPiecesFromDataAndPieceCount(data, pieceCount)
 	if err != nil {
 		return nil, err
+	}
+
+	// make sure probability is not too high
+	if probability > 1-float64(6)/float64(pieceCount) {
+		probability = 1 - float64(6)/float64(pieceCount)
 	}
 
 	enc := NewSparseRLNCEncoder(pieces, probability)

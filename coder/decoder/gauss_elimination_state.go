@@ -1,6 +1,8 @@
 package decoder
 
 import (
+	"sync"
+
 	"github.com/aecra/PeerCodeX/coder"
 	galoisfield "github.com/aecra/PeerCodeX/coder/galoisfield/table"
 	"github.com/aecra/PeerCodeX/coder/matrix"
@@ -58,6 +60,7 @@ func (d *GaussElimDecoderState) clean_forward() {
 			}
 		}
 
+		var wg sync.WaitGroup
 		for j := i + 1; j < rows; j++ {
 			if d.coeffs[j][i] == 0 {
 				continue
@@ -68,10 +71,15 @@ func (d *GaussElimDecoderState) clean_forward() {
 				d.coeffs[j][k] = d.field.Add(d.coeffs[j][k], d.field.Mul(d.coeffs[i][k], quotient))
 			}
 
-			for k := 0; k < len(d.coded[0]); k++ {
-				d.coded[j][k] = d.field.Add(d.coded[j][k], d.field.Mul(d.coded[i][k], quotient))
-			}
+			wg.Add(1)
+			go func(j int, quotient byte) {
+				defer wg.Done()
+				for k := 0; k < len(d.coded[0]); k++ {
+					d.coded[j][k] = d.field.Add(d.coded[j][k], d.field.Mul(d.coded[i][k], quotient))
+				}
+			}(j, quotient)
 		}
+		wg.Wait()
 	}
 }
 
@@ -130,6 +138,7 @@ func (d *GaussElimDecoderState) clean_backward() {
 			continue
 		}
 
+		var wg sync.WaitGroup
 		for j := 0; j < i; j++ {
 			if d.coeffs[j][i] == 0 {
 				continue
@@ -140,11 +149,15 @@ func (d *GaussElimDecoderState) clean_backward() {
 				d.coeffs[j][k] = d.field.Add(d.coeffs[j][k], d.field.Mul(d.coeffs[i][k], quotient))
 			}
 
-			for k := 0; k < len(d.coded[0]); k++ {
-				d.coded[j][k] = d.field.Add(d.coded[j][k], d.field.Mul(d.coded[i][k], quotient))
-			}
-
+			wg.Add(1)
+			go func(j int, quotient byte) {
+				defer wg.Done()
+				for k := 0; k < len(d.coded[0]); k++ {
+					d.coded[j][k] = d.field.Add(d.coded[j][k], d.field.Mul(d.coded[i][k], quotient))
+				}
+			}(j, quotient)
 		}
+		wg.Wait()
 
 		if d.coeffs[i][i] == 1 {
 			continue

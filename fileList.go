@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"net"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -98,7 +97,7 @@ func makeFileListToolbar(refresh func()) *widget.Toolbar {
 			// add file
 			log.Println(reader.URI().Path())
 			openLoadingMask()
-			err = dc.AddFileItem(reader.URI().Path())
+			err = dc.AddFile(reader.URI().Path())
 			if err != nil {
 				dialog.ShowError(err, topWindow)
 				return
@@ -124,7 +123,7 @@ func makeFileListItem(parent *widget.List) *fyne.Container {
 	var InfoAction, DownloadAction, DeleteAction *widget.ToolbarAction
 	InfoAction = widget.NewToolbarAction(theme.InfoIcon(), func() {
 		log.Println("Info of ", pathLabel.Text)
-		f := dc.GetFileItemByPath(pathLabel.Text)
+		f := dc.GetFileByPath(pathLabel.Text)
 		if f == nil {
 			dialog.ShowError(errors.New("file not found"), topWindow)
 		}
@@ -150,19 +149,12 @@ func makeFileListItem(parent *widget.List) *fyne.Container {
 		downloadActive.Lock()
 		defer downloadActive.Unlock()
 
-		f := dc.GetFileItemByPath(pathLabel.Text)
-		if f == nil {
+		file := dc.GetFileByPath(pathLabel.Text)
+		if file == nil {
 			dialog.ShowError(errors.New("file not found"), topWindow)
 		}
 
-		idDownloaded := true
-		for _, v := range f.IsDownloaded {
-			if v == false {
-				idDownloaded = false
-				break
-			}
-		}
-		if idDownloaded {
+		if file.GetProcessRate() == 1 {
 			progressBar.SetValue(1)
 			return
 		}
@@ -178,104 +170,35 @@ func makeFileListItem(parent *widget.List) *fyne.Container {
 						break
 					}
 
-					idDownloaded := true
-					for _, v := range f.IsDownloaded {
-						if v == false {
-							idDownloaded = false
-							break
-						}
-					}
-					// if downloaded, stop watching
-					if idDownloaded {
-						progressBar.SetValue(1)
+					progressBar.SetValue(file.GetProcessRate())
+					if file.GetProcessRate() == 1 {
 						break
 					}
-
-					// sum ProcessRate
-					var sumRate float64
-					for _, v := range f.ProcessRate {
-						sumRate += v
-					}
-					progressBar.SetValue(sumRate / float64(len(f.ProcessRate)))
-
 					time.Sleep(time.Second)
 				}
 			}()
 		}
 
-		// if any block is downloading, stop it
-		anyDownloading := false
-		for hashStr, v := range f.IsDownloading {
-			if v {
-				anyDownloading = true
-				f.IsDownloading[hashStr] = false
-				// close all connections
-				for _, c := range f.Conns[hashStr] {
-					c.Close()
-				}
-				// clear f.Conns
-				f.Conns[hashStr] = []net.Conn{}
-				for _, node := range f.Nodes {
-					node.HaveClient[hashStr] = false
-				}
-			}
-		}
-		if anyDownloading {
+		if file.IsDownloading() {
+			file.StopReceivingCodedPiece()
 			parent.Refresh()
 			return
 		}
 
-		f.StartReceiveCodedPiece()
-		for hashStr := range f.IsDownloading {
-			f.IsDownloading[hashStr] = true
-			for _, node := range f.Nodes {
-				if node.IsOn == true && node.HaveClient[hashStr] == false {
-					// start a new client
-					c := client.NewClient(node.Addr, []byte(hashStr), dc.GetPort(), f.AddCodedPieceChan[hashStr])
-					connChan := make(chan net.Conn)
-					go c.Start(connChan)
-					if f.Conns[hashStr] == nil {
-						f.Conns[hashStr] = make([]net.Conn, 0)
-					}
-					// timeout
-					go func(hashStr string, node *dc.NodeItem) {
-						select {
-						case c.Conn = <-connChan:
-							f.ConnsMutex[hashStr].Lock()
-							f.Conns[hashStr] = append(f.Conns[hashStr], c.Conn)
-							f.ConnsMutex[hashStr].Unlock()
-							node.HaveClient[hashStr] = true
-						case <-time.After(time.Second * 5):
-						}
-					}(hashStr, node)
-
-				}
-			}
-		}
+		client.RequestForFile(file)
 
 		parent.Refresh()
 	})
 	DeleteAction = widget.NewToolbarAction(theme.DeleteIcon(), func() {
 		log.Println("Delete")
-		f := dc.GetFileItemByPath(pathLabel.Text)
+		f := dc.GetFileByPath(pathLabel.Text)
 		if f == nil {
 			dialog.ShowError(errors.New("file not found"), topWindow)
 		}
-		for hashStr, conns := range f.Conns {
-			if f.IsDownloading[hashStr] {
-				// close all connections
-				for _, c := range conns {
-					c.Close()
-				}
-				// clear f.Conns
-				f.Conns[hashStr] = []net.Conn{}
-				for _, node := range f.Nodes {
-					node.HaveClient[hashStr] = false
-				}
-			}
-		}
 
-		dc.DeleteFileItemByPath(pathLabel.Text)
+		f.StopReceivingCodedPiece()
+
+		dc.DeleteFileByPath(pathLabel.Text)
 		parent.Refresh()
 	})
 

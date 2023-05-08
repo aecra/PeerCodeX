@@ -21,72 +21,164 @@ func CheckServer(addr string) bool {
 
 // client type is used to connect to a server
 type Client struct {
-	Addr              string
-	Hash              []byte
-	LocalServerPort   string
-	Conn              net.Conn
-	AddCodedPieceChan chan *coder.CodedPiece
+	Addr       string
+	Hash       []byte
+	Generation *dc.Generation
 }
 
-func NewClient(addr string, hash []byte, localServerPort string, addCodedPieceChan chan *coder.CodedPiece) *Client {
-	return &Client{Addr: addr, Hash: hash, LocalServerPort: localServerPort, AddCodedPieceChan: addCodedPieceChan}
+func NewClient(addr string, hash []byte, generation *dc.Generation) *Client {
+	return &Client{Addr: addr, Hash: hash, Generation: generation}
 }
 
 var StartClientChan = make(chan *Client)
 
 func init() {
-	// check server status every 60 seconds
+	// check server status
 	go func() {
-		time.Sleep(60 * time.Second)
+		time.Sleep(51 * time.Second)
 		CkeckAllServerStatus()
 	}()
 
-	// check dc.FileList.Nodes to start new client every 60 seconds
+	// check dc.FileList.Nodes to start new client
 	go func() {
-		time.Sleep(60 * time.Second)
-		for _, file := range dc.FileList {
-			for _, hash := range file.NcFile.Info.Hash {
-				hashStr := string(hash)
-				if file.IsDownloaded[hashStr] {
-					continue
-				}
-				if file.AddCodedPieceChan[hashStr] == nil {
-					file.AddCodedPieceChan[hashStr] = make(chan *coder.CodedPiece, 100)
-				}
-				for _, node := range file.Nodes {
-					if node.IsOn == true && node.HaveClient[hashStr] == false {
-						// start a new client
-						c := NewClient(node.Addr, hash, dc.GetPort(), file.AddCodedPieceChan[hashStr])
-						connChan := make(chan net.Conn)
-						go c.Start(connChan)
-						if file.Conns[hashStr] == nil {
-							file.Conns[hashStr] = make([]net.Conn, 0)
-						}
-						c.Conn = <-connChan
-						file.ConnsMutex[hashStr].Lock()
-						file.Conns[hashStr] = append(file.Conns[hashStr], c.Conn)
-						file.ConnsMutex[hashStr].Unlock()
-						node.HaveClient[hashStr] = true
-					}
+		for {
+			time.Sleep(59 * time.Second)
+			for _, file := range dc.FileList {
+				for _, generation := range file.Generations {
+					RequestForGeneration(generation)
 				}
 			}
 		}
 	}()
 
-	// TODO：检测是否有足够的邻居节点，如果没有则请求
+	// search for enough neighbours
+	go func() {
+		for {
+			time.Sleep(37 * time.Second)
+			for _, file := range dc.FileList {
+				for _, generation := range file.Generations {
+					// delete nodes which is not on
+					generation.NodesMutex.Lock()
+					oldNeighbours := generation.Nodes
+					generation.Nodes = make([]*dc.Node, 0)
+					for _, node := range oldNeighbours {
+						if node.IsOn == false && node.HaveClient == false {
+							continue
+						}
+						generation.Nodes = append(generation.Nodes, node)
+					}
+
+					// get new neighbours
+					newNeighbours := make([]string, 0)
+					if len(generation.Nodes) < 10 {
+						for _, node := range generation.Nodes {
+							if node.IsOn == true {
+								c := NewClient(node.Addr, generation.Hash, generation)
+								neighbours := c.GetNeighbours()
+								for _, neighbour := range neighbours {
+									if !isSelf(neighbour) {
+										newNeighbours = append(newNeighbours, neighbour)
+									}
+								}
+							}
+							if len(generation.Nodes)+len(newNeighbours) >= 10 {
+								break
+							}
+						}
+					}
+					generation.Nodes = append(generation.Nodes, oldNeighbours...)
+					generation.NodesMutex.Unlock()
+				}
+			}
+		}
+	}()
+}
+
+func isSelf(addr string) bool {
+	// split ip/host and port
+	var host, port string
+	for i := len(addr) - 1; i >= 0; i-- {
+		if addr[i] == ':' {
+			host = addr[:i]
+			port = addr[i+1:]
+			break
+		}
+	}
+	if host == "" || port == "" {
+		return true
+	}
+	hosts := getLocalHost()
+	for _, h := range hosts {
+		if h == host {
+			if port == dc.GetPort() {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func getLocalHost() []string {
+	inters, err := net.Interfaces()
+	if err != nil {
+		panic(err)
+	}
+	var hosts []string
+	for _, inter := range inters {
+		addrs, err := inter.Addrs()
+		if err != nil {
+			panic(err)
+		}
+		for _, addr := range addrs {
+			hosts = append(hosts, addr.String())
+		}
+	}
+
+	for i, host := range hosts {
+		index := 0
+		for j, c := range host {
+			if c == '/' {
+				index = j
+			}
+		}
+		hosts[i] = host[:index]
+	}
+	return hosts
+}
+
+func RequestForFile(file *dc.File) {
+	for _, generation := range file.Generations {
+		go RequestForGeneration(generation)
+	}
+}
+
+func RequestForGeneration(generation *dc.Generation) {
+	log.Println("RequestForGeneration: ", hex.EncodeToString(generation.Hash))
+	generation.StartReceiving()
+	for _, node := range generation.Nodes {
+		if node.IsOn == true && node.HaveClient == false {
+			// start a new client
+			c := NewClient(node.Addr, generation.Hash, generation)
+			connChan := make(chan net.Conn)
+			go c.Start(connChan)
+			conn := <-connChan
+			node.HaveClient = true
+			generation.AddConn(conn)
+		}
+	}
 }
 
 func CkeckAllServerStatus() {
-	nodeItems := dc.GetNodeStatusList()
-	for _, node := range nodeItems {
-		c := NewClient(node.Addr, make([]byte, 20), dc.GetPort(), nil)
+	nodes := dc.GetNodeStatusList()
+	for _, node := range nodes {
+		c := NewClient(node.Addr, make([]byte, 20), nil)
 		status := c.IsServerAlive()
 		dc.UpdateNodeStatus(node.Addr, status)
 	}
 }
 
 func CkeckServerStatus(addr string) {
-	c := NewClient(addr, make([]byte, 20), dc.GetPort(), nil)
+	c := NewClient(addr, make([]byte, 20), nil)
 	status := c.IsServerAlive()
 	dc.UpdateNodeStatus(addr, status)
 	return
@@ -97,7 +189,7 @@ func handleShake(client *Client, conn net.Conn, infohash []byte, reserved []byte
 	pstrlen := []byte{0x0e}
 	pstr := []byte("Network Coding")
 	serverport := []byte{0x00, 0x00}
-	port, _ := strconv.Atoi(client.LocalServerPort)
+	port, _ := strconv.Atoi(dc.GetPort())
 	binary.BigEndian.PutUint16(serverport, uint16(port))
 	// combine all
 	sbuf := append(pstrlen, pstr...)
@@ -240,6 +332,9 @@ func (c *Client) Start(connChan chan net.Conn) {
 			return
 		}
 		codedPiece.Piece = pieceBuf
-		c.AddCodedPieceChan <- &codedPiece
+		if c.Generation.AddCodedPieceChan == nil {
+			return
+		}
+		c.Generation.AddCodedPieceChan <- &codedPiece
 	}
 }

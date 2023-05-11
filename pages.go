@@ -180,6 +180,11 @@ func makeFileListContent() fyne.CanvasObject {
 			return makeFileListItem(fileListWidget)
 		},
 		func(id widget.ListItemID, item fyne.CanvasObject) {
+			dc.FileListMutex.RLock()
+			defer dc.FileListMutex.RUnlock()
+			if len(dc.FileList) <= int(id) {
+				return
+			}
 			f := dc.FileList[id]
 			progressBar := item.(*fyne.Container).Objects[0].(*fyne.Container).Objects[0].(*widget.ProgressBar)
 			downloadedTextLabel := item.(*fyne.Container).Objects[1].(*fyne.Container).Objects[2].(*widget.Label)

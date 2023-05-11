@@ -43,11 +43,13 @@ func init() {
 	go func() {
 		for {
 			time.Sleep(59 * time.Second)
+			dc.FileListMutex.RLock()
 			for _, file := range dc.FileList {
 				for _, generation := range file.Generations {
 					RequestForGeneration(generation)
 				}
 			}
+			dc.FileListMutex.RUnlock()
 		}
 	}()
 
@@ -55,41 +57,45 @@ func init() {
 	go func() {
 		for {
 			time.Sleep(37 * time.Second)
+			dc.FileListMutex.RLock()
 			for _, file := range dc.FileList {
-				for _, generation := range file.Generations {
-					// delete nodes which is not on
-					generation.NodesMutex.Lock()
-					oldNeighbours := generation.Nodes
-					generation.Nodes = make([]*dc.Node, 0)
-					for _, node := range oldNeighbours {
-						if node.IsOn == false && node.HaveClient == false {
-							continue
+				go func(file *dc.File) {
+					for _, generation := range file.Generations {
+						// delete nodes which is not on
+						generation.NodesMutex.Lock()
+						oldNeighbours := generation.Nodes
+						generation.Nodes = make([]*dc.Node, 0)
+						for _, node := range oldNeighbours {
+							if node.IsOn == false && node.HaveClient == false {
+								continue
+							}
+							generation.Nodes = append(generation.Nodes, node)
 						}
-						generation.Nodes = append(generation.Nodes, node)
-					}
 
-					// get new neighbours
-					newNeighbours := make([]string, 0)
-					if len(generation.Nodes) < 10 {
-						for _, node := range generation.Nodes {
-							if node.IsOn == true {
-								c := NewClient(node.Addr, generation.Hash, generation)
-								neighbours := c.GetNeighbours()
-								for _, neighbour := range neighbours {
-									if !isSelf(neighbour) {
-										newNeighbours = append(newNeighbours, neighbour)
+						// get new neighbours
+						newNeighbours := make([]string, 0)
+						if len(generation.Nodes) < 10 {
+							for _, node := range generation.Nodes {
+								if node.IsOn == true {
+									c := NewClient(node.Addr, generation.Hash, generation)
+									neighbours := c.GetNeighbours()
+									for _, neighbour := range neighbours {
+										if !isSelf(neighbour) {
+											newNeighbours = append(newNeighbours, neighbour)
+										}
 									}
 								}
-							}
-							if len(generation.Nodes)+len(newNeighbours) >= 10 {
-								break
+								if len(generation.Nodes)+len(newNeighbours) >= 10 {
+									break
+								}
 							}
 						}
+						generation.Nodes = append(generation.Nodes, oldNeighbours...)
+						generation.NodesMutex.Unlock()
 					}
-					generation.Nodes = append(generation.Nodes, oldNeighbours...)
-					generation.NodesMutex.Unlock()
-				}
+				}(file)
 			}
+			dc.FileListMutex.RUnlock()
 		}
 	}()
 }
@@ -155,6 +161,8 @@ func RequestForFile(file *dc.File) {
 func RequestForGeneration(generation *dc.Generation) {
 	log.Println("RequestForGeneration: ", hex.EncodeToString(generation.Hash))
 	generation.StartReceiving()
+	generation.NodesMutex.RLock()
+	defer generation.NodesMutex.RUnlock()
 	for _, node := range generation.Nodes {
 		if node.IsOn == true && node.HaveClient == false {
 			// start a new client

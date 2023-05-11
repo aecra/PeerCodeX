@@ -2,6 +2,7 @@ package dc
 
 import (
 	"errors"
+	"sync"
 	"time"
 
 	"github.com/aecra/PeerCodeX/coder"
@@ -9,9 +10,10 @@ import (
 )
 
 var (
-	FileList = make([]*File, 0)
-	host     = "0.0.0.0"
-	port     = "8080"
+	FileList      = make([]*File, 0)
+	FileListMutex = sync.RWMutex{}
+	host          = "0.0.0.0"
+	port          = "8080"
 )
 
 // TODO: Optimizing locks, read-write locks
@@ -19,15 +21,19 @@ func init() {
 	// check encoder status
 	go func() {
 		for {
-			time.Sleep(3 * time.Second)
+			time.Sleep(3 * time.Minute)
+			FileListMutex.RLock()
 			for _, file := range FileList {
 				file.DropIdleEncoder()
 			}
+			FileListMutex.RUnlock()
 		}
 	}()
 }
 
 func GetFileByPath(path string) *File {
+	FileListMutex.RLock()
+	defer FileListMutex.RUnlock()
 	for _, item := range FileList {
 		if item.Path == path {
 			return item
@@ -37,6 +43,8 @@ func GetFileByPath(path string) *File {
 }
 
 func DeleteFileByPath(path string) {
+	FileListMutex.Lock()
+	defer FileListMutex.Unlock()
 	for i, item := range FileList {
 		if item.Path == path {
 			FileList = append(FileList[:i], FileList[i+1:]...)
@@ -55,11 +63,15 @@ func AddFile(path string) error {
 		return err
 	}
 
+	FileListMutex.Lock()
 	FileList = append(FileList, file)
+	FileListMutex.Unlock()
 	return nil
 }
 
 func IsGenerationExist(hash []byte) bool {
+	FileListMutex.RLock()
+	defer FileListMutex.RUnlock()
 	for _, item := range FileList {
 		for _, h := range item.NcFile.Info.Hash {
 			if tools.CompareHash(hash, h) {
@@ -87,29 +99,35 @@ func SetPort(p string) {
 }
 
 func GetNeighbours(hash []byte) []*Node {
+	FileListMutex.RLock()
+	defer FileListMutex.RUnlock()
 	// return atmost 10 neighbours
 	neighbours := make([]*Node, 0)
 	for _, f := range FileList {
 		for _, g := range f.Generations {
 			if tools.CompareHash(g.Hash, hash) {
+				g.NodesMutex.RLock()
 				for _, n := range g.Nodes {
 					if len(neighbours) >= 10 {
 						return neighbours
 					}
 					neighbours = append(neighbours, n)
 				}
+				g.NodesMutex.RUnlock()
 			}
 		}
 	}
 	for _, f := range FileList {
 		for _, g := range f.Generations {
 			if !tools.CompareHash(g.Hash, hash) {
+				g.NodesMutex.RLock()
 				for _, n := range g.Nodes {
 					if len(neighbours) >= 10 {
 						return neighbours
 					}
 					neighbours = append(neighbours, n)
 				}
+				g.NodesMutex.RUnlock()
 			}
 		}
 	}
@@ -117,6 +135,8 @@ func GetNeighbours(hash []byte) []*Node {
 }
 
 func GetCodedPiece(hash []byte) *coder.CodedPiece {
+	FileListMutex.RLock()
+	defer FileListMutex.RUnlock()
 	for _, f := range FileList {
 		for _, g := range f.Generations {
 			if tools.CompareHash(g.Hash, hash) {
@@ -128,12 +148,16 @@ func GetCodedPiece(hash []byte) *coder.CodedPiece {
 }
 
 func GetNodeStatusList() []*Node {
+	FileListMutex.RLock()
+	defer FileListMutex.RUnlock()
 	nodes := make([]*Node, 0)
 	for _, f := range FileList {
 		for _, g := range f.Generations {
+			g.NodesMutex.RLock()
 			for _, n := range g.Nodes {
 				nodes = append(nodes, n)
 			}
+			g.NodesMutex.RUnlock()
 		}
 	}
 	result := []*Node{}
@@ -156,24 +180,32 @@ func GetNodeStatusList() []*Node {
 }
 
 func UpdateNodeStatus(address string, status bool) {
+	FileListMutex.RLock()
+	defer FileListMutex.RUnlock()
 	for _, f := range FileList {
 		for _, g := range f.Generations {
+			g.NodesMutex.RLock()
 			for _, n := range g.Nodes {
 				if n.Addr == address {
 					n.IsOn = status
 				}
 			}
+			g.NodesMutex.RUnlock()
 		}
 	}
 }
 
 func AddNode(addr string) {
+	FileListMutex.RLock()
+	defer FileListMutex.RUnlock()
 	for _, f := range FileList {
 		f.AddNode(addr)
 	}
 }
 
 func DeleteNode(addr string) {
+	FileListMutex.RLock()
+	defer FileListMutex.RUnlock()
 	for _, f := range FileList {
 		f.DeleteNode(addr)
 	}

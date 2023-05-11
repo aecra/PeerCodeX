@@ -19,7 +19,7 @@ type Generation struct {
 	Hash              []byte                 // hash of the file
 	File              *File                  // file which this generation belongs to
 	Nodes             []*Node                // nodes which have this generation
-	NodesMutex        *sync.Mutex            // mutex of nodes
+	NodesMutex        *sync.RWMutex          // mutex of nodes
 	isDownloaded      bool                   // whether this generation is downloaded
 	isDownloading     bool                   // whether this generation is downloading
 	Conns             []net.Conn             // connections of this generation
@@ -37,7 +37,7 @@ func NewGeneration(file *File, hash []byte, announceList []string, isDownloaded 
 		Hash:       hash,
 		File:       file,
 		Nodes:      make([]*Node, 0),
-		NodesMutex: &sync.Mutex{},
+		NodesMutex: &sync.RWMutex{},
 		Conns:      make([]net.Conn, 0),
 		connsMutex: &sync.Mutex{},
 	}
@@ -211,11 +211,11 @@ func (g *Generation) StopReceiving() {
 	g.Conns = []net.Conn{}
 	g.connsMutex.Unlock()
 
-	g.NodesMutex.Lock()
+	g.NodesMutex.RLock()
 	for _, node := range g.Nodes {
 		node.HaveClient = false
 	}
-	g.NodesMutex.Unlock()
+	g.NodesMutex.RUnlock()
 
 	g.cancelReceiving()
 	g.AddCodedPieceChan = nil

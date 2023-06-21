@@ -16,7 +16,6 @@ var (
 	port          = "8080"
 )
 
-// TODO: Optimizing locks, read-write locks
 func init() {
 	// check encoder status
 	go func() {

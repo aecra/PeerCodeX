@@ -44,7 +44,7 @@ func main() {
 		content.Objects[0] = GetPages()[id].Content
 		content.Refresh()
 	}
-	// 默认选中第一个页面
+	// choose the first page by default
 	navList.Select(0)
 
 	themes := container.NewGridWithColumns(2,
@@ -63,7 +63,7 @@ func main() {
 	mainContent = split
 	w.SetContent(split)
 
-	// 设置最小窗口大小
+	// set the minimum window size
 	w.Resize(fyne.NewSize(800, 600))
 
 	w.ShowAndRun()

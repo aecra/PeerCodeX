@@ -148,7 +148,7 @@ func (g *Generation) GetCodedPiece() *coder.CodedPiece {
 		return g.Encoder.CodedPiece()
 	}
 
-	// 创建encoder
+	// create encoder
 	file, err := os.Open(g.File.GetTargetFile())
 	if err != nil {
 		return nil
@@ -160,7 +160,7 @@ func (g *Generation) GetCodedPiece() *coder.CodedPiece {
 	}
 	file.Close()
 
-	g.Encoder, err = encoder.NewSparseRLNCEncoderWithPieceCount(data, g.File.GetPieceCount(g.Hash), 0.9)
+	g.Encoder, err = encoder.NewSparseRLNCEncoderWithPieceCount(data, g.File.GetPieceCount(g.Hash), 0.95)
 	if err != nil {
 		return nil
 	}

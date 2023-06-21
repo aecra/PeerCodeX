@@ -8,11 +8,10 @@ import (
 )
 
 type SparseRLNCEncoder struct {
-	field          *galoisfield.GF
-	probability    float64
-	currentPieceId uint
-	pieces         []coder.Piece
-	extra          uint
+	field       *galoisfield.GF
+	probability float64
+	pieces      []coder.Piece
+	extra       uint
 }
 
 // Total #-of pieces being coded together --- denoting
@@ -60,38 +59,11 @@ func (s *SparseRLNCEncoder) Padding() uint {
 	return s.extra
 }
 
-// Generates a systematic coded piece's coding vector, which has
-// only one non-zero element ( 1 )
-func (s *SparseRLNCEncoder) systematicCodingVector(idx uint) coder.CodingVector {
-	if idx >= s.PieceCount() {
-		return nil
-	}
-
-	vector := make(coder.CodingVector, s.PieceCount())
-	vector[idx] = 1
-	return vector
-}
-
 // Returns a coded piece, which is constructed on-the-fly
 // by randomly drawing elements from finite field i.e.
 // coding coefficients & performing sparse-RLNC with
 // all original pieces
 func (s *SparseRLNCEncoder) CodedPiece() *coder.CodedPiece {
-	if s.currentPieceId < s.PieceCount() {
-		// `nil` coding vector can be returned, which is
-		// not being checked at all, as in that case we'll
-		// never get into `if` branch
-		vector := s.systematicCodingVector(s.currentPieceId)
-		piece := make(coder.Piece, s.PieceSize())
-		copy(piece, s.pieces[s.currentPieceId])
-
-		s.currentPieceId++
-		return &coder.CodedPiece{
-			Vector: vector,
-			Piece:  piece,
-		}
-	}
-
 	vector := coder.GenerateCodingVector(s.PieceCount())
 	// set some elements to zero
 	for i := range vector {
@@ -114,10 +86,9 @@ func (s *SparseRLNCEncoder) CodedPiece() *coder.CodedPiece {
 // to N-many coded pieces
 func NewSparseRLNCEncoder(pieces []coder.Piece, probability float64) Encoder {
 	return &SparseRLNCEncoder{
-		pieces:         pieces,
-		field:          galoisfield.DefaultGF256,
-		probability:    probability,
-		currentPieceId: 0,
+		pieces:      pieces,
+		field:       galoisfield.DefaultGF256,
+		probability: probability,
 	}
 }
 
